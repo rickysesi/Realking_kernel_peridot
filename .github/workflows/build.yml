@@ -1,0 +1,192 @@
+name: Build Android Kernel
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:  # Allow manual triggering
+
+env:
+  KERNEL_VERSION: "6.1"
+  ANDROID_VERSION: "14"
+  ARCH: "arm64"
+  CONFIG: "vendor/sm8550_defconfig"  # Update with your actual defconfig
+  CLANG_VERSION: "r487747c"  # Android 14 compatible Clang version
+
+jobs:
+  build-kernel:
+    runs-on: ubuntu-22.04  # Or ubuntu-latest
+    timeout-minutes: 60
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+        submodules: 'recursive'
+        
+    - name: Setup build environment
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          build-essential \
+          libncurses-dev \
+          bison \
+          flex \
+          libssl-dev \
+          libelf-dev \
+          bc \
+          kmod \
+          cpio \
+          git \
+          wget \
+          curl \
+          python3 \
+          device-tree-compiler
+        
+    - name: Download Android toolchain
+      run: |
+        mkdir -p ${{ github.workspace }}/toolchains
+        cd ${{ github.workspace }}/toolchains
+        
+        # Download Android NDK (Clang toolchain)
+        wget -q https://dl.google.com/android/repository/android-ndk-r25c-linux.zip
+        unzip -q android-ndk-r25c-linux.zip
+        rm android-ndk-r25c-linux.zip
+        
+        # Download GCC toolchain for ARM64 (if needed)
+        wget -q https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9/+archive/master.tar.gz
+        tar -xzf master.tar.gz
+        rm master.tar.gz
+        
+    - name: Setup environment variables
+      run: |
+        echo "NDK_PATH=${{ github.workspace }}/toolchains/android-ndk-r25c" >> $GITHUB_ENV
+        echo "GCC_PATH=${{ github.workspace }}/toolchains/aarch64-linux-android-4.9" >> $GITHUB_ENV
+        echo "KERNEL_DIR=${{ github.workspace }}" >> $GITHUB_ENV
+        echo "OUT_DIR=${{ github.workspace }}/out" >> $GITHUB_ENV
+        
+    - name: Configure build variables
+      run: |
+        # Set toolchain paths
+        export CLANG_PATH="$NDK_PATH/toolchains/llvm/prebuilt/linux-x86_64/bin"
+        export GCC_PATH="$GCC_PATH/bin"
+        export PATH="$CLANG_PATH:$GCC_PATH:$PATH"
+        
+        # Set build variables
+        export ARCH=arm64
+        export SUBARCH=arm64
+        export CROSS_COMPILE=aarch64-linux-android-
+        export CROSS_COMPILE_ARM32=arm-linux-androideabi-
+        
+        # Android-specific variables
+        export CLANG_TRIPLE=aarch64-linux-gnu-
+        export LLVM=1
+        export LLVM_IAS=1
+        
+        echo "Toolchain paths configured"
+        
+    - name: Clean previous builds
+      run: |
+        make mrproper || true
+        rm -rf $OUT_DIR || true
+        mkdir -p $OUT_DIR
+        
+    - name: Generate kernel config
+      run: |
+        cd $KERNEL_DIR
+        export ARCH=arm64
+        export SUBARCH=arm64
+        export CROSS_COMPILE=aarch64-linux-android-
+        export CROSS_COMPILE_ARM32=arm-linux-androideabi-
+        export LLVM=1
+        
+        # Use appropriate defconfig
+        make O=$OUT_DIR ARCH=$ARCH $CONFIG
+        
+    - name: Build kernel
+      run: |
+        cd $KERNEL_DIR
+        
+        # Set build variables
+        export ARCH=arm64
+        export SUBARCH=arm64
+        export CROSS_COMPILE=aarch64-linux-android-
+        export CROSS_COMPILE_ARM32=arm-linux-androideabi-
+        export LLVM=1
+        export LLVM_IAS=1
+        
+        # Build with Clang
+        make O=$OUT_DIR \
+          ARCH=$ARCH \
+          CC="$CLANG_PATH/clang" \
+          CLANG_TRIPLE="aarch64-linux-gnu-" \
+          CROSS_COMPILE="$CLANG_PATH/llvm-" \
+          -j$(nproc --all)
+        
+    - name: Build kernel modules (if any)
+      run: |
+        cd $KERNEL_DIR
+        export ARCH=arm64
+        export SUBARCH=arm64
+        export LLVM=1
+        
+        make O=$OUT_DIR \
+          ARCH=$ARCH \
+          CC="$CLANG_PATH/clang" \
+          modules \
+          -j$(nproc --all)
+          
+    - name: Generate DTBs
+      run: |
+        cd $KERNEL_DIR
+        export ARCH=arm64
+        export SUBARCH=arm64
+        export LLVM=1
+        
+        make O=$OUT_DIR \
+          ARCH=$ARCH \
+          CC="$CLANG_PATH/clang" \
+          dtbs \
+          -j$(nproc --all)
+          
+    - name: List build artifacts
+      run: |
+        echo "Build artifacts in $OUT_DIR:"
+        find $OUT_DIR -name "*.ko" -type f | head -10
+        find $OUT_DIR -name "Image*" -type f
+        find $OUT_DIR -name "*.dtb" -type f | head -5
+        ls -la $OUT_DIR/arch/arm64/boot/
+        
+    - name: Archive build artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: kernel-build-${{ github.run_id }}
+        path: |
+          ${{ github.workspace }}/out/arch/arm64/boot/
+          ${{ github.workspace }}/out/*.ko
+          ${{ github.workspace }}/out/arch/arm64/boot/dts/**/*.dtb
+        retention-days: 7
+        
+    - name: Create boot.img (optional)
+      run: |
+        # This step requires your device's dtb.img and other components
+        # Adjust based on your device requirements
+        cd $KERNEL_DIR
+        if [ -f "scripts/mkimage" ]; then
+          echo "Creating boot image..."
+          # Add your mkbootimg command here
+          # Example:
+          # mkbootimg --kernel $OUT_DIR/arch/arm64/boot/Image.gz \
+          #          --dtb $OUT_DIR/arch/arm64/boot/dts/vendor/*.dtb \
+          #          --output $OUT_DIR/boot.img
+        fi
+        
+    - name: Upload boot image (optional)
+      if: success()
+      uses: actions/upload-artifact@v4
+      with:
+        name: boot-image-${{ github.run_id }}
+        path: ${{ github.workspace }}/out/boot.img
+        retention-days: 7
