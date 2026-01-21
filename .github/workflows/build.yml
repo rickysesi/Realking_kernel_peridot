@@ -11,7 +11,7 @@ env:
   KERNEL_VERSION: "6.1"
   ANDROID_VERSION: "14"
   ARCH: "arm64"
-  CONFIG: "vendor/sm8550_defconfig"  # Update with your actual defconfig
+  CONFIG: "vendor/peridot_defconfig"  # Update with your actual defconfig
   CLANG_VERSION: "r487747c"  # Android 14 compatible Clang version
 
 jobs:
